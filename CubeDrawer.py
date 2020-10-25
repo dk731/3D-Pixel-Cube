@@ -1,26 +1,68 @@
-from multiprocessing import shared_memory
+from multiprocessing import shared_memory, Semaphore
 from math import floor, pi, sin, cos
+import ast
 
 
 class CubeDrawer:
-    def __init__(self, debug, size):
-        self.size = size
-        self.debug = debug
-        if self.debug:
-            try:
-                self.shm_obj = shm_a = shared_memory.SharedMemory(
-                    name="VirtualCubeSHMemmory"
-                )
-            except Exception as e:
-                raise Exception(
-                    "Was not able to connect to shared memmory, probably Virtual Cube was not started"
-                )
-            print("Successfuly connected to virtual cube")
-            print("Shared memmory block with: ", self.shm_obj.size, "bytes")
-            print(
-                "State byte: ",
-                self.shm_obj.buf[0],
+    def __init__(self, pallete_file):
+        self.size = (16, 16, 16)
+        self.lb = 0
+        
+        try:
+            # self.shm_obj = shared_memory.SharedMemory(
+            #     name="VirtualCubeSHMemmory", create=True, size=self.lb + 1
+            # )
+            print(shared_memory._USE_POSIX)
+            self.shm_obj = shared_memory.SharedMemory(
+                name="VirtualCubeSHMemmory"
             )
+            self.lb = self.shm_obj.size - 1
+        except:
+            raise Exception("Was not able to create shared memmory object.")
+        print(
+            "Successfuly connected to shared memmory object, with size: {}".format(
+                self.shm_obj.size
+            )
+        )
+
+        print("Loading pallete, from file {}".format(pallete_file))
+
+                
+        self.shm_obj.buf[self.lb - 2] = 0
+        self.shm_obj.buf[self.lb - 1] = 0
+        self.shm_obj.buf[self.lb] = 0
+        self.shm_obj.buf[self.lb - 3] = 0
+
+        fp = open(pallete_file, "r")
+        lines = fp.readlines()
+        self.col_bits = int(lines[0][12::])
+        self.col_amount = int(lines[1][14::])
+        self.col_shades = int(lines[2][7::])
+        self.col_black_shades = int(lines[3][13::])
+        self.pallete_list = ast.literal_eval(lines[4])
+        print(
+            "Pallete parametrs. Color deph: {}, Colors amout: {}, Shades: {}, Black Shades: {}, Readed list with size: {}".format(
+                self.col_bits, self.col_amount, self.col_shades, self.col_black_shades, len(self.pallete_list)
+            )
+        )
+        self.shm_obj.buf[self.lb - 3] = self.col_bits
+
+        for col in range(len(self.pallete_list)):
+            for c in range(3):
+                self.shm_obj.buf[col * 3 + c] = self.pallete_list[col][c]
+            #     print(self.shm_obj.buf[col * 3 + c], end=", ")
+            # print()
+
+        self.shm_obj.buf[self.lb] |= 128
+        
+        print("Loading pallete to threads...")
+        while True:
+            if (self.shm_obj.buf[self.lb - 1] == 256 and self.shm_obj.buf[self.lb - 2] == 256):
+                break
+        
+        print("Pallete was loaded to arduinos")
+
+
         self.clear()
         self._init_drawing_()
         self.transform_list = list()
@@ -55,12 +97,7 @@ class CubeDrawer:
     def pixel_at(self, p):
 
         for tran in self.transform_list:
-            # rotate
             xx, yy, zz = p
-
-            # xx -= tran[0]
-            # yy -= tran[1]
-            # zz -= tran[2]
 
             rx, ry, rz = tran[1]
             p[0] = (
@@ -77,9 +114,6 @@ class CubeDrawer:
 
             p[2] = (cos(rx) * sin(ry)) * xx + (sin(rx) * sin(ry)) * yy + (cos(ry)) * zz
 
-            # scale
-
-            # translate
             p[0] += tran[0][0]
             p[1] += tran[0][1]
             p[2] += tran[0][2]
@@ -179,3 +213,7 @@ class CubeDrawer:
         self.pixel_at([p[0] - radius, p[1], p[2]])
         self.pixel_at([p[0], p[1] + radius, p[2]])
         self.pixel_at([p[0], p[1] - radius, p[2]])
+
+    def __del__(self):
+        self.shm_obj.close()
+        self.shm_obj.unlink()

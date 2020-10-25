@@ -2,10 +2,10 @@ from CubeDrawer import *
 from time import sleep
 import itertools
 import random
-
 import math
 
-cd = CubeDrawer(True, (16, 16, 16))
+cd = CubeDrawer("8bit_8shades.txt")
+# cd = CubeDrawer("4bit_2shades.txt")
 
 # cd.push_matrix()
 # cd.translate((8, 8, 8))
