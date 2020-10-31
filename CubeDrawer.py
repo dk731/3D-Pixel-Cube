@@ -5,18 +5,12 @@ import ast
 
 class CubeDrawer:
     def __init__(self, pallete_file):
-        self.size = (16, 16, 16)
-        self.lb = 0
-        
+        self.size = (16, 16, 16)     
         try:
-            # self.shm_obj = shared_memory.SharedMemory(
-            #     name="VirtualCubeSHMemmory", create=True, size=self.lb + 1
-            # )
             print(shared_memory._USE_POSIX)
             self.shm_obj = shared_memory.SharedMemory(
                 name="VirtualCubeSHMemmory"
             )
-            self.lb = self.shm_obj.size - 1
         except:
             raise Exception("Was not able to create shared memmory object.")
         print(
@@ -24,48 +18,57 @@ class CubeDrawer:
                 self.shm_obj.size
             )
         )
-
-        print("Loading pallete, from file {}".format(pallete_file))
-
-                
-        self.shm_obj.buf[self.lb - 2] = 0
-        self.shm_obj.buf[self.lb - 1] = 0
-        self.shm_obj.buf[self.lb] = 0
-        self.shm_obj.buf[self.lb - 3] = 0
-
-        fp = open(pallete_file, "r")
-        lines = fp.readlines()
-        self.col_bits = int(lines[0][12::])
-        self.col_amount = int(lines[1][14::])
-        self.col_shades = int(lines[2][7::])
-        self.col_black_shades = int(lines[3][13::])
-        self.pallete_list = ast.literal_eval(lines[4])
-        print(
-            "Pallete parametrs. Color deph: {}, Colors amout: {}, Shades: {}, Black Shades: {}, Readed list with size: {}".format(
-                self.col_bits, self.col_amount, self.col_shades, self.col_black_shades, len(self.pallete_list)
-            )
-        )
-        self.shm_obj.buf[self.lb - 3] = self.col_bits
-
-        for col in range(len(self.pallete_list)):
-            for c in range(3):
-                self.shm_obj.buf[col * 3 + c] = self.pallete_list[col][c]
-            #     print(self.shm_obj.buf[col * 3 + c], end=", ")
-            # print()
-
-        self.shm_obj.buf[self.lb] |= 128
-        
-        print("Loading pallete to threads...")
-        while True:
-            if (self.shm_obj.buf[self.lb - 1] == 256 and self.shm_obj.buf[self.lb - 2] == 256):
-                break
-        
-        print("Pallete was loaded to arduinos")
-
-
+        self.load_new_pallete(pallete_file)
         self.clear()
         self._init_drawing_()
         self.transform_list = list()
+
+    def load_new_pallete(self, file_name):
+        print("Loading pallete, from file {}".format(file_name))
+
+                
+        self.shm_obj.buf[-1] = 64 # setting flag for new pallete
+
+        fp = open(file_name, "r")
+        lines = fp.readlines()
+
+
+        self.col_bits = int(lines[0][12::])
+        self.col_amount = int(lines[1][14::])
+        self.col_shades = int(lines[2][7::])
+        self.shades_min = int(lines[3][10::]) # [0, ]
+        print(
+            "Pallete parametrs. Color deph: {}, Colors amout: {}, Shades: {}, Minimal shade value: {}".format(
+                self.col_bits, self.col_amount, self.col_shades, self.shades_min
+            )
+        )
+        
+        self.shm_obj.buf[-1] = 64
+        b1, b2 = self.col_bits.to_bytes(2, 'big')
+        self.shm_obj.buf[0] = b2
+        self.shm_obj.buf[1] = b1
+        b1, b2 = self.col_amount.to_bytes(2, 'big')
+        self.shm_obj.buf[2] = b2
+        self.shm_obj.buf[3] = b1
+        b1, b2 = self.col_shades.to_bytes(2, 'big')
+        self.shm_obj.buf[4] = b2
+        self.shm_obj.buf[5] = b1
+        b1, b2 = self.shades_min.to_bytes(2, 'big')
+        self.shm_obj.buf[6] = b2
+        self.shm_obj.buf[7] = b1
+        
+
+        # LOAD ALL DATA
+        
+
+        self.shm_obj.buf[-1] |= 128
+        
+        print("Loading pallete to threads...")
+        while self.shm_obj.buf[-1] & 128:
+            pass
+        
+        print("Pallete was loaded to arduinos")
+
 
     def _init_drawing_(self):
         self.colors = bytearray(self.size[0] * self.size[1] * self.size[2] * 3)

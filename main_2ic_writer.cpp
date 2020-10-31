@@ -1,5 +1,6 @@
 #include <iostream>
 #include <thread>
+#include <cmath>
 
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -10,17 +11,109 @@
 #include <sys/ioctl.h>
 
 const unsigned char FLAG_CSHM = 128; // if shm is 1 than ready for copy
-const unsigned char FLAG_RTW = 64; // buf is ready to be written to arduino's
-const unsigned char FLAG_NP = 32; // data comming shoud be loaded as new pallete
+const unsigned char FLAG_NP = 64;    // new pallete flag
 
-const int BUFFER_SIZE = 32;
+const unsigned char FLAG_ERRI = 128; // if error happend during initialization, flag will be 1
+const unsigned char FLAG_ERRD = 64;  // if error happend during i2c handle mapping ( device was not found )
+const unsigned char FLAG_WR = 1;     // all arduinos were written
 
-struct shm_buf {
-    unsigned char buf[12288]{0}; // 16^3 * 3 - max size in bytes
-    unsigned char color_size; // size in bits
-    unsigned short int states; // states of each arduino
-    unsigned char flags; // general purpose flags
+const unsigned char COMMAND_LD = 1; // loading new data.
+const unsigned char COMMAND_NP = 2; // command to arduino, new pallete is comming
+
+struct pallete
+{
+    unsigned short int size = 0;
+    unsigned short int colors_amount = 0;
+    unsigned short int shades_amount = 0;
+    unsigned short int unmapped_min = 0; // [0,  65535]
+    unsigned short int grey_amount = 0;
+    float hdelta = 0.0f;
+    float sdelta = 0.0f;
+    float bdelta = 0.0f;
+    float min_val = 0.0f;
+
+    void init()
+    {
+        hdelta = 1.0f / colors_amount;
+        min_val = unmapped_min / 65535.0f;
+        sdelta = (1.0f - min_val) / shades_amount * 2.0f;
+        grey_amount = ((unsigned short int)pow(2, size) - 1) - (colors_amount * (shades_amount + 1)) - 1;
+        bdelta = 1.0f / grey_amount;
+    }
 };
+
+struct shm_buf
+{
+    unsigned char buf[12288]{0}; // 16^3 * 3 - max size in bytes
+    unsigned char flags{0};      // general purpose flags
+};
+
+struct c_buf
+{
+    unsigned char command{0};
+    unsigned char buf[3092]{0};
+    unsigned int buf_size{0}; // amount of full packets (32 bytes)
+    unsigned char states{0};
+    unsigned char flags{0};
+};
+
+struct hsv
+{
+    double h; // angle in degrees
+    double s; // a fraction between 0 and 1
+    double v;
+};
+
+hsv rgb2hsv(unsigned char *ptc)
+{
+
+    float fR = ptc[0] / 255.0f;
+    float fG = ptc[1] / 255.0f;
+    float fB = ptc[2] / 255.0f;
+
+    hsv out;
+
+    float fCMax = std::max(std::max(fR, fG), fB);
+    float fCMin = std::min(std::min(fR, fG), fB);
+    float fDelta = fCMax - fCMin;
+
+    if (fDelta > 0)
+    {
+        if (fCMax == fR)
+        {
+            out.h = (fmod(((fG - fB) / fDelta), 6));
+        }
+        else if (fCMax == fG)
+        {
+            out.h = (((fB - fR) / fDelta) + 2);
+        }
+        else if (fCMax == fB)
+        {
+            out.h = (((fR - fG) / fDelta) + 4);
+        }
+
+        if (fCMax > 0)
+        {
+            out.s = fDelta / fCMax;
+        }
+        else
+        {
+            out.s = 0;
+        }
+
+        out.v = fCMax;
+    }
+    else
+    {
+        out.v = 0;
+        out.v = 0;
+        out.v = fCMax;
+    }
+    out.h /= 6.0f;
+    if (out.h < 0)
+        out.h += 1;
+    return out;
+}
 
 bool get_bit_at(void *buf, int i)
 {
@@ -32,7 +125,6 @@ bool get_bit_at(void *buf, int i)
         return 0;
 }
 
-
 void set_bit_at(void *buf, int i, bool val) // buf - should be zeros
 {
     int bit_shift = i % 8;
@@ -40,7 +132,7 @@ void set_bit_at(void *buf, int i, bool val) // buf - should be zeros
     *((unsigned char *)buf + amount_of_full_bytes) |= 1 << bit_shift;
 }
 
-void rewrite_bit(void* to, int indt, void* from, int indf) // rewrites bit from one buffer to other at specific bit positions
+void rewrite_bit(void *to, int indt, void *from, int indf) // rewrites bit from one buffer to other at specific bit positions
 {
     int bit_shiftf = indf % 8;
     int amount_of_full_bytesf = (indf - bit_shiftf) / 8;
@@ -54,7 +146,7 @@ void rewrite_bit(void* to, int indt, void* from, int indf) // rewrites bit from 
 
 void print_buf(void *buf, int buf_size, int bytes_inline) // Used in debug purpose, buf_size % bytes_inline == 0  !!!
 {
-    for (int i = 0; i < buf_size / bytes_inline; i ++)
+    for (int i = 0; i < buf_size / bytes_inline; i++)
     {
         for (int j = 0; j < bytes_inline; j++)
         {
@@ -69,129 +161,144 @@ void print_buf(void *buf, int buf_size, int bytes_inline) // Used in debug purpo
     }
 }
 
-void i2c_writer_thread(int i2c_port, int arduino_id, shm_buf* buffer) // arduino id - id of arduinos's pack of 4
+void i2c_writer_thread(int i2c_port, int arduino_id, c_buf *buffer) // arduino id - id of arduinos's pack of 4
 {
     char filename[11] = "/dev/i2c-";
     filename[9] = i2c_port + '0';
-    
+
     int i2cf = open(filename, O_RDWR);
 
     if (i2cf < 0)
     {
-        buffer->color_size |= 1 << arduino_id;
+        buffer->flags |= FLAG_ERRI;
         return;
     }
 
-    std::cout << "Sucssefuly oppened device: " << filename << std::endl;
-
-
     for (int i = 0; i < 4; i++)
     {
-        //if (ioctl(i2cf, I2C_SLAVE, i) >= 0)
+        //if (ioctl(i2cf, I2C_SLAVE, i) < 0)
         if (true)
-            buffer->states |= 1 << (arduino_id * 4 + i);
+        {
+            buffer->flags |= FLAG_ERRD;
+            buffer->states |= 1 << (i * 4);
+        }
     }
-
 
     while (true)
     {
-        if (buffer->flags & FLAG_RTW)
+        if (buffer->flags & FLAG_WR == 0)
         {
-            if (buffer->flags & FLAG_NP)
-            {
-                std::cout << "Uploding new pallete" << std::endl;
 
-                continue;
-            }
-
-            int size_of_layer = buffer->color_size * 16 * 16; // in bits
-            int pack_start_bit = arduino_id * 4 * size_of_layer; 
+            // Loading buffer to all arduinos
 
             for (int i = 0; i < 4; i++)
             {
-                std::cout << "Arduino id: " << i << std::endl;
-                //if (ioctl(i2cf, I2C_SLAVE, i) >= 0)
+
+                int layer_byte = buffer->buf_size * 32 * i;
+                //if (ioctl(i2cf, I2C_SLAVE, i) < 0)
                 if (false)
                 {
-                    std::cout << "Error, was not able to find device with id: " << i << std::endl;
+                    //std::cout << "Error, was not able to find device with id: " << i << std::endl;
+                    buffer->flags |= FLAG_ERRD;
+                    buffer->states |= 1 << i;
                     continue;
                 }
-                int layer_start_bit = i * size_of_layer + pack_start_bit;
 
-                for (int l = 0; l < buffer->color_size; l++) // Loop for wrting data in full chunks ( each 32 bytes )
+                write(i2cf, &(buffer->command), 1);
+
+                for (int l = 0; l < buffer->buf_size; l++) // Loop for wrting data in full chunks ( each 32 bytes )
                 {
-                    unsigned char send_buffer[32]{0};
-                    int chunk_start_bit = l * 256 + layer_start_bit;
-
-                    std::cout << "Packs start bit: " << pack_start_bit << ",  Layer start bit: " << layer_start_bit << ",  Chunk start bit: " << chunk_start_bit << std::endl;
-
-                    for (int b = 0; b < 256; b++)
-                        rewrite_bit(&send_buffer, b, buffer, chunk_start_bit + b);
-
-                    // std::cout << "Buffer: " << l << "" << std::endl
-                    //           << std::endl;
-                    // print_buf(send_buffer, 32, 4);
-
-                    //write(i2cf, send_buffer, 32);
+                    write(i2cf, &(buffer->buf) + layer_byte + l * 32, 32);
                 }
             }
-            buffer->states |= 15 << arduino_id;
-            return;
+            buffer->flags |= FLAG_WR;
         }
     }
-    
-
 
     /*
         On init check all devices
     */
-
-
 }
 
-
-
-void i2c_mem_cpy(shm_buf* shm_b, shm_buf* c_buf)
+void i2c_mem_cpy(shm_buf *shm_b, c_buf *c_buf)
 {
-
-    std::cout << "Generating and loading debug data ..." << std::endl;
-    int debug_buf_size = 384 * 2;
-    unsigned char buf[debug_buf_size]{0};
-
-    for (int i = 0; i < debug_buf_size; i++)
-    {
-        int a = rand() % 255;
-        buf[i] = a;
-        std::cout << static_cast<unsigned>(buf[i]) << "; ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "Printing debug data: " << std::endl << std::endl;
-
-    memcpy(c_buf, &buf, debug_buf_size);
-    print_buf(c_buf, debug_buf_size, 16);
-
-    std::cout << std::endl;
-
-    c_buf->color_size = 3;
-
-    std::cout << "Loaded all data and flags" << std::endl;
-    c_buf->flags |= FLAG_RTW;
-    return;
-
-    ///////////////////////////////////////
-
-    std::cout << "Wait for data" << std::endl;
+    pallete cur_pallete;
+    std::cout << "Waiting for cshm flag" << std::endl;
     while (true)
     {
         if (shm_b->flags & FLAG_CSHM)
         {
-            while (true)
+            std::cout << "Catched cshm flag" << std::endl;
+            while (false) // Wait until all threads done their writing to arduinos
             {
-                if (c_buf->states == 65535)
+                bool ready = true;
+
+                for (int i = 0; i < 4; i++)
+                {
+                    ready = (c_buf[i].flags & FLAG_WR) == 0;
+                }
+
+                if (ready)
                     break;
+
+                usleep(1000);
             }
-            memcpy(c_buf, shm_b, sizeof(shm_buf));
+            for (int i = 0; i < 4; i++)
+                c_buf[i].flags = 0;
+            std::cout << static_cast<unsigned>(shm_b->flags) << std::endl;
+            if (shm_b->flags & FLAG_NP) // loads aplletes to all arduinos
+            {
+                memcpy(&cur_pallete.size, &shm_b->buf, 8);
+                cur_pallete.init();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    c_buf[i].command = COMMAND_NP;
+                    c_buf[i].buf_size = 8;
+                    for (int j = 0; j < 4; j++)
+                        memcpy(&c_buf[i].buf[j * 8], &cur_pallete.size, 8);
+
+                    c_buf[i].flags |= FLAG_WR;
+                }
+                std::cout << "Loaded new pallete to threads" << std::endl;
+                shm_b->flags &= ~FLAG_CSHM;
+                continue;
+            }
+
+            hsv pcol;
+
+            for (int i = 0; i < 4; i++)
+            {
+                c_buf[i].command = COMMAND_LD;
+                int bit_ind = 0;
+                for (int l = i << 2; l < i << 2 + 4; l++)
+                {
+                    int z = l;
+                    int dif = (z % 2 == 0) ? 1 : -1;
+                    for (int y = 15; y >= 0; y--)
+                    {
+
+                        int for_v = (z % 2 == 0) ? 1 : -1;
+                        for (int x = ((for_v > 0) ? 0 : 15); (x >= 0 && x < 16); x += for_v)
+                        {
+                            pcol = rgb2hsv(&shm_b->buf[(x + (y << 4) + (z << 8)) * 3]);
+
+                            //unsigned int ind = (pcol.s < cur_pallete.min_val) ? (cur_pallete.colors_amount * (cur_pallete.shades_amount + 1)) + round(pcol.v / cur_pallete.bdelta) : ((pcol.h / cur_pallete.hdelta) * (cur_pallete.shades_amount + 1)) + (pcol.v >= 0.8 ? (1 - pcol.s) / cur_pallete.sdelta : (1 - pcol.v) / cur_pallete.sdelta + cur_pallete.shades_amount / 2);
+                            unsigned int ind = 1;
+                            for (int j = cur_pallete.size - 1; j >= 0; j--)
+                            {
+                                rewrite_bit(&ind, i, &c_buf[i].buf, bit_ind);
+                                bit_ind++;
+                            }
+                        }
+                        z += dif;
+                        dif *= -1;
+                    }
+                }
+                print_buf(&c_buf[i].buf, c_buf[i].buf_size << 5, 8);
+                c_buf[i].flags |= FLAG_WR;
+            }
+
             shm_b->flags &= ~FLAG_CSHM;
         }
         else
@@ -201,17 +308,18 @@ void i2c_mem_cpy(shm_buf* shm_b, shm_buf* c_buf)
 
 int main()
 {
-    srand (time(NULL));
 
+    srand(time(NULL));
 
-    shm_buf cbuf;
+    c_buf c_buffers[4];
+
     int shmid = shm_open("VirtualCubeSHMemmory", O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
     if (shmid == -1)
     {
         std::cout << "Was not able to create shared memmory object." << std::endl;
         return 1;
     }
-    std::cout << "Sucssesfuly created SHM object, with id: " << shmid <<  std::endl;
+    std::cout << "Sucssesfuly created SHM object, with id: " << shmid << std::endl;
 
     if (ftruncate(shmid, sizeof(shm_buf)) == -1)
     {
@@ -228,12 +336,59 @@ int main()
 
     int a;
 
-    std::thread th1w(i2c_writer_thread, 1, 0, &cbuf);
+    // std::thread th1w(i2c_writer_thread, 1, 0, &c_buffers[0]);
+    // std::thread th2w(i2c_writer_thread, 3, 1, &c_buffers[1]);
+    // std::thread th3w(i2c_writer_thread, 4, 2, &c_buffers[2]);
+    // std::thread th4w(i2c_writer_thread, 5, 3, &c_buffers[3]);
 
-    std::thread copy_thread(i2c_mem_cpy, shmb, &cbuf);
+    usleep(1000000); // wait till threads initialize
+    std::thread copy_thread(i2c_mem_cpy, shmb, c_buffers);
+    // bool error = false;
 
-    
-    th1w.join();
+    // for (int i = 0; i < 4; i++) // // statuses of i2c legs of rasp
+    // {
+    //     std::cout << cbuf.color_size << std::endl;
+    //     if (cbuf.color_size & (1 << i))
+    //     {
+    //         std::cout << "Was not able to open i2c with arduino id: " << i << std::endl;
+    //         std::cout << "Continue without arduino's with id: " << i << " ? [y/n]: ";
+
+    //         char inp;
+    //         std::cin >> inp;
+    //         if (inp == 'n' || inp == 'N')
+    //         {
+    //             std::cout << "Stopping all threads, clossing shared memmory ..." << std::endl;
+    //             goto end;
+    //         }
+    //     }
+    //     else
+    //     {
+    //         std::cout << "Sucssefuly initialized i2c bus in thread with id: " << i << std::endl;
+    //     }
+    // }
+
+    // for (int i = 0; i < 16; i++)
+    // {
+    //     if (cbuf.states & (1 << i))
+    //     {
+    //         std::cout << "Was not able to detect arduino, pack id: " << i / 4 << " with id: " << i % 4 << std::endl;
+    //         error = true;
+    //     }
+    // }
+    // if (error)
+    // {
+    //     std::cout << "Some arduino's were not detected, want to stop?[y/n]: ";
+    //     char inp;
+    //     std::cin >> inp;
+    //     if (inp == 'y' || inp == 'Y')
+    //     {
+    //         std::cout << "Stopping all threads, clossing shared memmory ..." << std::endl;
+    //         goto end;
+    //     }
+
+    // }
+
+    // th1w.join();
     copy_thread.join();
 
     // std::cin >> a;
@@ -244,6 +399,7 @@ int main()
     // }
 
     // std::cin >> a;
+end:
     shm_unlink("VirtualCubeSHMemmory");
 
     return 0;
