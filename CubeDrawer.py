@@ -5,12 +5,10 @@ import ast
 
 class CubeDrawer:
     def __init__(self, pallete_file):
-        self.size = (16, 16, 16)     
+        self.size = (16, 16, 16)
         try:
             print(shared_memory._USE_POSIX)
-            self.shm_obj = shared_memory.SharedMemory(
-                name="VirtualCubeSHMemmory"
-            )
+            self.shm_obj = shared_memory.SharedMemory(name="VirtualCubeSHMemmory")
         except:
             raise Exception("Was not able to create shared memmory object.")
         print(
@@ -26,49 +24,42 @@ class CubeDrawer:
     def load_new_pallete(self, file_name):
         print("Loading pallete, from file {}".format(file_name))
 
-                
-        self.shm_obj.buf[-1] = 64 # setting flag for new pallete
+        self.shm_obj.buf[-1] = 64  # setting flag for new pallete
 
         fp = open(file_name, "r")
         lines = fp.readlines()
 
-
         self.col_bits = int(lines[0][12::])
         self.col_amount = int(lines[1][14::])
         self.col_shades = int(lines[2][7::])
-        self.shades_min = int(lines[3][10::]) # [0, ]
+        self.shades_min = int(lines[3][10::])  # [0, ]
         print(
             "Pallete parametrs. Color deph: {}, Colors amout: {}, Shades: {}, Minimal shade value: {}".format(
                 self.col_bits, self.col_amount, self.col_shades, self.shades_min
             )
         )
-        
+
         self.shm_obj.buf[-1] = 64
-        b1, b2 = self.col_bits.to_bytes(2, 'big')
+        b1, b2 = self.col_bits.to_bytes(2, "big")
         self.shm_obj.buf[0] = b2
         self.shm_obj.buf[1] = b1
-        b1, b2 = self.col_amount.to_bytes(2, 'big')
+        b1, b2 = self.col_amount.to_bytes(2, "big")
         self.shm_obj.buf[2] = b2
         self.shm_obj.buf[3] = b1
-        b1, b2 = self.col_shades.to_bytes(2, 'big')
+        b1, b2 = self.col_shades.to_bytes(2, "big")
         self.shm_obj.buf[4] = b2
         self.shm_obj.buf[5] = b1
-        b1, b2 = self.shades_min.to_bytes(2, 'big')
+        b1, b2 = self.shades_min.to_bytes(2, "big")
         self.shm_obj.buf[6] = b2
         self.shm_obj.buf[7] = b1
-        
-
-        # LOAD ALL DATA
-        
 
         self.shm_obj.buf[-1] |= 128
-        
+
         print("Loading pallete to threads...")
         while self.shm_obj.buf[-1] & 128:
             pass
-        
-        print("Pallete was loaded to arduinos")
 
+        print("Pallete was loaded to arduinos")
 
     def _init_drawing_(self):
         self.colors = bytearray(self.size[0] * self.size[1] * self.size[2] * 3)
@@ -77,19 +68,23 @@ class CubeDrawer:
     def draw(self):
         # self.transform_list.clear()
         # RASP draw
-        if not self.debug:
+
+        while self.shm_obj.buf[-1] & 128:
             pass
-        else:
-            while self.shm_obj.buf[0] == 2:
-                pass
-            self.shm_obj.buf[1 : len(self.colors) + 1] = self.colors
-            self.shm_obj.buf[0] = 1
+
+        self.shm_obj.buf[-1] = 0
+
+        print("Starting to write to shred memmory")
+
+        self.shm_obj.buf[
+            0 : len(self.colors)
+        ] = self.colors  # loading from python array to shared memmory
+
+        self.shm_obj.buf[-1] |= 128 + 32
+        print("All data loaded, ready flag setted")
 
     def clear(self, color=None):
-        if not color:
-            self.colors = bytearray(self.size[0] * self.size[1] * self.size[2] * 3)
-        else:
-            self.colors
+        self.colors = bytearray(self.size[0] * self.size[1] * self.size[2] * 3)
 
     def set_size(self, size):
         self.cursor_size = size
@@ -216,7 +211,3 @@ class CubeDrawer:
         self.pixel_at([p[0] - radius, p[1], p[2]])
         self.pixel_at([p[0], p[1] + radius, p[2]])
         self.pixel_at([p[0], p[1] - radius, p[2]])
-
-    def __del__(self):
-        self.shm_obj.close()
-        self.shm_obj.unlink()

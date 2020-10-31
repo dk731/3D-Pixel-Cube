@@ -12,6 +12,7 @@
 
 const unsigned char FLAG_CSHM = 128; // if shm is 1 than ready for copy
 const unsigned char FLAG_NP = 64;    // new pallete flag
+const unsigned char FLAG_LD = 32;    // ready for loading frame data
 
 const unsigned char FLAG_ERRI = 128; // if error happend during initialization, flag will be 1
 const unsigned char FLAG_ERRD = 64;  // if error happend during i2c handle mapping ( device was not found )
@@ -22,7 +23,7 @@ const unsigned char COMMAND_NP = 2; // command to arduino, new pallete is commin
 
 struct pallete
 {
-    unsigned short int size = 0;
+    unsigned short int size = 0; // one color size in bits
     unsigned short int colors_amount = 0;
     unsigned short int shades_amount = 0;
     unsigned short int unmapped_min = 0; // [0,  65535]
@@ -132,16 +133,12 @@ void set_bit_at(void *buf, int i, bool val) // buf - should be zeros
     *((unsigned char *)buf + amount_of_full_bytes) |= 1 << bit_shift;
 }
 
-void rewrite_bit(void *to, int indt, void *from, int indf) // rewrites bit from one buffer to other at specific bit positions
+void rewrite_color(void *buf, int col_size, int col_ind, unsigned int col)
 {
-    int bit_shiftf = indf % 8;
-    int amount_of_full_bytesf = (indf - bit_shiftf) / 8;
+    unsigned char *buff = (unsigned char *)buf;
+    int bit_ind = col_size * col_ind;
 
-    int bit_shiftt = indt % 8;
-    int amount_of_full_bytest = (indt - bit_shiftt) / 8;
-
-    if (*((unsigned char *)from + amount_of_full_bytesf) & (128 >> bit_shiftf))
-        *((unsigned char *)to + amount_of_full_bytest) |= (128 >> bit_shiftt);
+    *(unsigned int *)&buff[bit_ind >> 3] |= col << (bit_ind % 8);
 }
 
 void print_buf(void *buf, int buf_size, int bytes_inline) // Used in debug purpose, buf_size % bytes_inline == 0  !!!
@@ -150,7 +147,7 @@ void print_buf(void *buf, int buf_size, int bytes_inline) // Used in debug purpo
     {
         for (int j = 0; j < bytes_inline; j++)
         {
-            for (int l = 0; l < 8; l++)
+            for (int l = 7; l >= 0; l--)
             {
                 //std::cout << "l: " << l << " i: " << i << " j: " << j << (l + (i * bytes_inline * 8) + j*8) << std::endl;
                 std::cout << static_cast<unsigned>(get_bit_at(buf, l + (i * bytes_inline * 8) + j * 8));
@@ -224,6 +221,7 @@ void i2c_mem_cpy(shm_buf *shm_b, c_buf *c_buf)
 {
     pallete cur_pallete;
     std::cout << "Waiting for cshm flag" << std::endl;
+MAIN_LOOP:
     while (true)
     {
         if (shm_b->flags & FLAG_CSHM)
@@ -238,14 +236,15 @@ void i2c_mem_cpy(shm_buf *shm_b, c_buf *c_buf)
                     ready = (c_buf[i].flags & FLAG_WR) == 0;
                 }
 
-                if (ready)
+                //if (ready)
+                if (true)
                     break;
 
                 usleep(1000);
             }
             for (int i = 0; i < 4; i++)
                 c_buf[i].flags = 0;
-            std::cout << static_cast<unsigned>(shm_b->flags) << std::endl;
+            //std::cout << static_cast<unsigned>(shm_b->flags) << std::endl;
             if (shm_b->flags & FLAG_NP) // loads aplletes to all arduinos
             {
                 memcpy(&cur_pallete.size, &shm_b->buf, 8);
@@ -262,43 +261,48 @@ void i2c_mem_cpy(shm_buf *shm_b, c_buf *c_buf)
                 }
                 std::cout << "Loaded new pallete to threads" << std::endl;
                 shm_b->flags &= ~FLAG_CSHM;
-                continue;
+                goto MAIN_LOOP;
             }
 
             hsv pcol;
 
-            for (int i = 0; i < 4; i++)
+            if (shm_b->flags & FLAG_LD)
             {
-                c_buf[i].command = COMMAND_LD;
-                int bit_ind = 0;
-                for (int l = i << 2; l < i << 2 + 4; l++)
+                std::cout << "Loading new data flag was detected" << std::endl;
+                for (int i = 0; i < 4; i++)
                 {
-                    int z = l;
-                    int dif = (z % 2 == 0) ? 1 : -1;
-                    for (int y = 15; y >= 0; y--)
+                    memset(&c_buf[i], 0, 3092);
+                    std::cout << "Starting loading to leg: " << i << std::endl;
+                    c_buf[i].command = COMMAND_LD;
+                    int col_ind = 0;
+                    for (int l = i << 2; l < ((i << 2) + 4); l++)
                     {
-
-                        int for_v = (z % 2 == 0) ? 1 : -1;
-                        for (int x = ((for_v > 0) ? 0 : 15); (x >= 0 && x < 16); x += for_v)
+                        int z = l;
+                        int dif = (z % 2 == 0) ? 1 : -1;
+                        for (int y = 15; y >= 0; y--)
                         {
-                            pcol = rgb2hsv(&shm_b->buf[(x + (y << 4) + (z << 8)) * 3]);
 
-                            //unsigned int ind = (pcol.s < cur_pallete.min_val) ? (cur_pallete.colors_amount * (cur_pallete.shades_amount + 1)) + round(pcol.v / cur_pallete.bdelta) : ((pcol.h / cur_pallete.hdelta) * (cur_pallete.shades_amount + 1)) + (pcol.v >= 0.8 ? (1 - pcol.s) / cur_pallete.sdelta : (1 - pcol.v) / cur_pallete.sdelta + cur_pallete.shades_amount / 2);
-                            unsigned int ind = 1;
-                            for (int j = cur_pallete.size - 1; j >= 0; j--)
+                            int for_v = (z % 2 == 0) ? 1 : -1;
+                            for (int x = ((for_v > 0) ? 0 : 15); (x >= 0 && x < 16); x += for_v)
                             {
-                                rewrite_bit(&ind, i, &c_buf[i].buf, bit_ind);
-                                bit_ind++;
-                            }
-                        }
-                        z += dif;
-                        dif *= -1;
-                    }
-                }
-                print_buf(&c_buf[i].buf, c_buf[i].buf_size << 5, 8);
-                c_buf[i].flags |= FLAG_WR;
-            }
+                                int indd = (x + (y << 4) + (z << 8)) * 3;
+                                pcol = rgb2hsv(&shm_b->buf[indd]);
 
+                                unsigned int ind = (pcol.s < cur_pallete.min_val) ? (cur_pallete.colors_amount * (cur_pallete.shades_amount + 1)) + round(pcol.v / cur_pallete.bdelta) : ((pcol.h / cur_pallete.hdelta) * (cur_pallete.shades_amount + 1)) + (pcol.v >= 0.8 ? (1 - pcol.s) / cur_pallete.sdelta : (1 - pcol.v) / cur_pallete.sdelta + cur_pallete.shades_amount / 2);
+
+                                rewrite_color(&c_buf[i].buf, cur_pallete.size, col_ind++, ind);
+                            }
+                            z += dif;
+                            dif *= -1;
+                        }
+                    }
+                    std::cout << "All data for leg: " << i << " was loaded, priting content: " << std::endl;
+
+                    print_buf(&c_buf[i].buf, cur_pallete.size << 5, 32);
+                    std::cout << std::endl;
+                    c_buf[i].flags |= FLAG_WR;
+                }
+            }
             shm_b->flags &= ~FLAG_CSHM;
         }
         else
@@ -323,7 +327,7 @@ int main()
 
     if (ftruncate(shmid, sizeof(shm_buf)) == -1)
     {
-        std::cout << "Was not able to truncate file with length: 12292" << std::endl;
+        std::cout << "Was not able to truncate file with length: 12288" << std::endl;
         return 1;
     }
     std::cout << "Sucssesfuly truncated to file with length: " << sizeof(shm_buf) << std::endl;
